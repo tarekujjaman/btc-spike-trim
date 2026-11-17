@@ -34,6 +34,16 @@ function sellAll(qty: bigint): OrderInput[] {
   return [{ side: 'sell', symbol: SYMBOL, qty, max_slippage_bps: MAX_SLIPPAGE_BPS }];
 }
 
+/** While long: is the close more than TRIM_BPS above the EMA, a spike worth trimming? */
+function shouldTrim(close: number, ema: number): boolean {
+  return close * 10_000 > ema * (10_000 + TRIM_BPS);
+}
+
+/** While flat: is the close back at or below the EMA, the moment to buy back in? */
+function shouldRebuy(close: number, ema: number): boolean {
+  return close <= ema;
+}
+
 function onBatch(state: BarsState, batch: Batch): OrderInput[] {
   const bar = batch.bars.find((b) => b.symbol === SYMBOL);
   if (bar === undefined) return []; // no CBBTC bar this minute: nothing to learn, nothing to do
@@ -43,17 +53,18 @@ function onBatch(state: BarsState, batch: Batch): OrderInput[] {
   ema = seen === 0 ? close : ema + ALPHA * (close - ema);
   seen++;
 
-  if (state.warmingUp) return []; // warm-up batches only feed the EMA
+  if (state.warmingUp) return []; // the harness's warm-up batches only feed the EMA
 
   const qty = state.positions.get(SYMBOL)?.qty ?? 0n;
   const long = qty > 0n;
 
-  // Before the EMA is full, just be long.
-  if (seen < SPAN) return long ? [] : buyAll(state);
+  // Warm-up hold: until the EMA has seen SPAN closes it has nothing to say, so just be long.
+  const emaWarmingUp = seen < SPAN;
+  if (emaWarmingUp) return long ? [] : buyAll(state);
 
-  // Long: trim once the close is more than TRIM_BPS above the EMA. Flat: buy back at or below it.
-  if (long) return close * 10_000 > ema * (10_000 + TRIM_BPS) ? sellAll(qty) : [];
-  return close <= ema ? buyAll(state) : [];
+  // The trading rule proper: trim the spike when long, buy back at the EMA when flat.
+  if (long) return shouldTrim(close, ema) ? sellAll(qty) : [];
+  return shouldRebuy(close, ema) ? buyAll(state) : [];
 }
 
 await runBars({
